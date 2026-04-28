@@ -1,5 +1,7 @@
-torch
-transformers
-fastapi
-uvicorn
-requests
+fastapi>=0.110.0
+uvicorn>=0.27.1
+requests>=2.31.0
+torch>=2.2.2
+transformers>=4.41.1
+pydantic>=2.6.4
+numpy>=1.26.4
