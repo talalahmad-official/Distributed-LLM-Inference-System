@@ -1,1 +1,235 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Distributed LLM Inference</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: 'Segoe UI', sans-serif;
+            background: linear-gradient(135deg, #0D1B3E 0%, #065A82 100%);
+            min-height: 100vh;
+            padding: 20px;
+            color: #333;
+        }
+        .container { max-width: 1400px; margin: 0 auto; }
+        header { text-align: center; color: white; margin-bottom: 30px; }
 
+        .stats {
+            display: grid;
+            grid-template-columns: repeat(4, 1fr);
+            gap: 15px;
+            margin-bottom: 30px;
+        }
+        .stat-box {
+            background: rgba(255, 255, 255, 0.1);
+            backdrop-filter: blur(10px);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            color: white;
+            padding: 20px;
+            border-radius: 12px;
+            text-align: center;
+        }
+        .stat-box h3 { font-size: 2.2em; }
+        .stat-box p { font-size: 0.8em; font-weight: bold; text-transform: uppercase; opacity: 0.8; }
+
+        .main-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 30px; }
+        .card {
+            background: white;
+            border-radius: 15px;
+            padding: 25px;
+            box-shadow: 0 15px 35px rgba(0,0,0,0.3);
+            min-height: 550px;
+            display: flex;
+            flex-direction: column;
+        }
+        .card-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            border-bottom: 3px solid #02C39A;
+            padding-bottom: 15px;
+            margin-bottom: 20px;
+        }
+        .clear-btn {
+            background: #EF4444; color: white; border: none; padding: 8px 16px;
+            border-radius: 6px; font-weight: bold; cursor: pointer;
+        }
+
+        .form-group { margin-bottom: 15px; }
+        textarea, input { width: 100%; padding: 12px; border: 2px solid #E2E8F0; border-radius: 8px; }
+
+        button[type="submit"] {
+            background: #02C39A; color: white; padding: 12px; width: 100%;
+            border: none; border-radius: 8px; font-weight: bold; cursor: pointer;
+        }
+
+        .scrollable-list { flex: 1; overflow-y: auto; margin-top: 10px; padding-right: 5px; }
+
+        /* Queue & Result Cards */
+        .query-card {
+            background: #F8FAFC; padding: 15px; margin-bottom: 12px;
+            border-radius: 10px; border-left: 5px solid #065A82;
+            box-shadow: 0 2px 5px rgba(0,0,0,0.05);
+        }
+
+        .status-badge {
+            padding: 4px 10px; border-radius: 6px; font-size: 0.75em; font-weight: bold;
+            background: #E2E8F0; color: #4A5568;
+        }
+        .status-completed { background: #DCFCE7; color: #166534; }
+        .status-processing { background: #DBEAFE; color: #1E40AF; }
+        .status-pause { background: #FEF3C7; color: #92400E; }
+        .status-start { background: #F1F5F9; color: #475569; }
+
+        .progress-bar { background: #EDF2F7; height: 8px; border-radius: 10px; margin: 12px 0; overflow: hidden; }
+        .progress-fill { height: 100%; background: #02C39A; transition: 0.4s; }
+
+        .result-preview { background: #F1F5F9; padding: 10px; border-radius: 8px; font-size: 0.9em; margin-top: 10px; border: 1px solid #E2E8F0; }
+    </style>
+</head>
+<body>
+
+<div class="container">
+    <header>
+        <h1>🚀 Distributed LLM Inference</h1>
+    </header>
+
+    <div class="stats">
+        <div class="stat-box"><h3 id="stat-total">0</h3><p>Total</p></div>
+        <div class="stat-box"><h3 id="stat-queued">0</h3><p>Queued</p></div>
+        <div class="stat-box"><h3 id="stat-processing">0</h3><p>Processing</p></div>
+        <div class="stat-box"><h3 id="stat-completed">0</h3><p>Completed</p></div>
+    </div>
+
+    <div class="main-grid">
+        <!-- Submission & Live Queue -->
+        <div class="card">
+            <div class="card-header"><h2>📝 New Query</h2></div>
+            <form id="queryForm">
+                <div class="form-group">
+                    <textarea id="prompt" placeholder="Enter prompt here..." required></textarea>
+                </div>
+                <div class="form-group">
+                    <input type="number" id="maxTokens" value="10" min="1">
+                </div>
+                <button type="submit" id="submitBtn">Submit</button>
+            </form>
+            <hr style="margin:20px 0; opacity:0.1;">
+            <div class="card-header"><h2>📋 Live Queue</h2></div>
+            <div class="scrollable-list" id="queryQueue"></div>
+        </div>
+
+        <!-- Results Section -->
+        <div class="card">
+            <div class="card-header">
+                <h2>📊 Result</h2>
+                <button class="clear-btn" onclick="clearEverything()">🗑 Clear All</button>
+            </div>
+            <div class="scrollable-list" id="allQueries"></div>
+        </div>
+    </div>
+</div>
+
+<script>
+    const API_URL = "http://localhost:8000";
+    let memoryHistory = {};
+
+    async function clearEverything() {
+        if(!confirm("Clear all data?")) return;
+        try {
+            await fetch(`${API_URL}/clear`, { method: "POST" });
+            memoryHistory = {};
+            updateUI({}, []);
+        } catch (err) { console.error(err); }
+    }
+
+    async function refreshQueries() {
+        try {
+            const response = await fetch(`${API_URL}/all-queries`);
+            const data = await response.json();
+            const serverQueries = data.queries || {};
+            memoryHistory = serverQueries;
+
+            const active = Object.entries(serverQueries).filter(([_, q]) => !['completed','error'].includes(q.status));
+            updateUI(serverQueries, active);
+        } catch (err) { console.error(err); }
+    }
+
+    // Helper to format status according to your request
+    function formatStatus(q) {
+        if (q.status === "worker1") return `Worker1-PID(${q.worker1_pid || '...'})`;
+        if (q.status === "worker2") return `Worker2-PID(${q.worker2_pid || '...'})`;
+        if (q.status === "returned") return "Pause";
+        if (q.status === "queued") return "Start";
+        if (q.status === "completed") return "Completed";
+        return q.status.toUpperCase();
+    }
+
+    // Map internal status to requested CSS classes
+    function getStatusClass(status) {
+        if (status === "worker1" || status === "worker2") return "status-processing";
+        if (status === "returned") return "status-pause";
+        if (status === "queued") return "status-start";
+        if (status === "completed") return "status-completed";
+        return "";
+    }
+
+    function updateUI(all, active) {
+        const vals = Object.values(all);
+        document.getElementById("stat-total").textContent = vals.length;
+        document.getElementById("stat-completed").textContent = vals.filter(x => x.status === 'completed').length;
+        document.getElementById("stat-queued").textContent = vals.filter(x => x.status === 'queued').length;
+        document.getElementById("stat-processing").textContent = vals.filter(x => ['worker1','worker2','returned'].includes(x.status)).length;
+
+        // Render Live Queue (No progress bar)
+        const qContainer = document.getElementById("queryQueue");
+        qContainer.innerHTML = active.length ? active.map(([id, q]) => `
+            <div class="query-card">
+                <div style="font-weight:bold; margin-bottom:5px;">Query: ${q.prompt}</div>
+                <div style="font-size:0.85em; color:#666; margin-bottom:8px;">Query ID: ${id}</div>
+                <div>Status: <span class="status-badge ${getStatusClass(q.status)}">${formatStatus(q)}</span></div>
+            </div>
+        `).join('') : '<p style="color:#999; text-align:center;">Empty</p>';
+
+        // Render Result (With progress bar)
+        const hContainer = document.getElementById("allQueries");
+        const allItems = Object.entries(all).reverse();
+        hContainer.innerHTML = allItems.length ? allItems.map(([id, q]) => {
+            const progParts = q.progress.split('/');
+            const percent = (parseInt(progParts[0]) / parseInt(progParts[1])) * 100 || 0;
+            return `
+                <div class="query-card">
+                    <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:10px;">
+                        <span style="font-size:0.85em; color:#666;">ID: ${id}</span>
+                        <span class="status-badge ${getStatusClass(q.status)}">${formatStatus(q)}</span>
+                    </div>
+                    <div style="font-weight:bold;">${q.prompt}</div>
+                    <div class="progress-bar"><div class="progress-fill" style="width:${percent}%"></div></div>
+                    <div style="font-size:0.75em; color:#666; text-align:right;">Progress: ${q.progress}</div>
+                    ${q.result ? `<div class="result-preview"><b>Result:</b> ${q.result}</div>` : ''}
+                </div>
+            `;
+        }).join('') : '<p style="color:#999; text-align:center;">Empty</p>';
+    }
+
+    document.getElementById("queryForm").onsubmit = async (e) => {
+        e.preventDefault();
+        const prompt = document.getElementById("prompt").value;
+        const max_tokens = document.getElementById("maxTokens").value;
+        try {
+            await fetch(`${API_URL}/generate`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ prompt, max_tokens: parseInt(max_tokens) })
+            });
+            document.getElementById("prompt").value = "";
+            refreshQueries();
+        } catch (err) { alert("Error"); }
+    };
+
+    setInterval(refreshQueries, 1000);
+</script>
+</body>
+</html>
